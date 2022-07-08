@@ -1,0 +1,10 @@
+[package]
+name = "compressions"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+sb-backend-3-actix = {path = '/home/rxz/dev/sb-actix-lib/sb-backend-3-actix'}
+actix              = "0.13.0"
