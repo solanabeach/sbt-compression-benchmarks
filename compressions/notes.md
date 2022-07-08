@@ -4,9 +4,10 @@ Goal is to compare speed/compression ratios when uploading/downloading from redp
 
 By algorithm:
 
-- zstd
 - gzip
+- zstd
 - lz4
+- snappy
 
 By modality:
 
