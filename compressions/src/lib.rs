@@ -58,20 +58,24 @@ pub fn read_files()->io::Result<()>{
 
 }
 
-pub fn gzip() {
+pub async fn funnel_data_off() {
+
+}
+
+pub async fn gzip() {
     let topic = "gzip_benchmark";
     let partion = 0;
     let bootstrap_hosts = "127.0.0.1:9095";
 
     let mut config = ClientConfig::new();
-    config.set("bootstrap.servers", bootstrap_hosts);
-    config.set("group.id", "compression-benchmarks");
-    config.set("statistics.interval.ms", "500");
-    config.set("compression.type", "gzip");
-    config.set("enable.idempotence", "true"); // required for keeping msgs sequential
-    config.set("queue.buffering.max.messages", "10000000"); // 100k msgs buffered
-    config.set("queue.buffering.max.kbytes", "2047483647"); // 2GB buffered
-    config.set("message.max.bytes", "500000000"); // max message size 500MB
+    config.set("bootstrap.servers"           , bootstrap_hosts         );
+    config.set("group.id"                    , "compression-benchmarks");
+    config.set("statistics.interval.ms"      , "500"                   );
+    config.set("compression.type"            , "gzip"                  );
+    config.set("enable.idempotence"          , "true"                  ); // required for keeping msgs sequential
+    config.set("queue.buffering.max.messages", "10000000"              ); // 100k msgs buffered
+    config.set("queue.buffering.max.kbytes"  , "2047483647"            ); // 2GB buffered
+    config.set("message.max.bytes"           , "500000000"             ); // max message size 500MB
 
     let producer    = FutureProducer::from_config(&config).expect("Failed to created producer");
     let mut r       = FutureRecord::to("gzip_benchmark");
@@ -84,6 +88,5 @@ pub fn gzip() {
     async { 
         let res = producer.send(r, Timeout::After(Duration::from_millis(15000)));
         let res = res.await.map_or(-1, |_|{println!("Delivered message"); 1});
-    }.await;
-
+    }.await
 }
