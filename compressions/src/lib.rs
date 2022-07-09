@@ -1,65 +1,37 @@
-use std::collections::HashMap;
-use std::fs::{read_dir, File};
-use std::io::{self, BufReader, Read};
 use std::process::exit;
 use std::time::Duration;
-
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::error::KafkaError;
-use rdkafka::message::ToBytes;
 use rdkafka::util::Timeout;
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
-use sb_backend_3_actix::actors::basic::AtrIOWrite;
-use sb_backend_3_actix::actors::basic::{AtrStringToSerde, AtrUtf8ToString};
-use sb_backend_3_actix::actors::kafka::{AtrKafkaConsumer, MsgJumpToOffset};
-use sb_backend_3_actix::actors::sb_actor::SBActor;
-use sb_backend_3_actix::actors::sb_atr_wrapper::ActorWrap;
-
 pub mod timeit;
-use rdkafka::producer::{BaseProducer, FutureProducer, FutureRecord};
-use sb_backend_3_actix::messages::MsgVoid;
-use serde_json::Value;
+use rdkafka::producer::{FutureProducer, FutureRecord};
 
-// #[actix::main]
-// pub async fn get_data() {
-//     println!("Hihih from libr.s");
-//     let topic: &'static str = "modern_blocks_json";
-//     let actor_iowrite = AtrIOWrite::new().wrap();
-//     let consumer_w =
-//         AtrKafkaConsumer::new_simple_hosts(topic, actor_iowrite, "localhost:9095").wrap();
 
-//     consumer_w.do_send(MsgJumpToOffset { offset: 5_000_000 });
-//     loop {
-//         let mut ival = actix::clock::interval(Duration::from_millis(1000));
-//         ival.tick().await;
-//         consumer_w.do_send(MsgVoid {});
+// pub fn read_files() -> io::Result<()> {
+//     use std::path::PathBuf;
+//     // let datapath = Path::new("").join(std::env::current_exe().unwrap()).join("samples");
+//     let datapath = "/home/rxz/dev/sb-actix-lib/sample-data";
+//     println!("attemptint to open {}", datapath);
+//     let mut rd = read_dir(datapath)?
+//         .map(|readdir| readdir.map(|p| p.path()))
+//         .collect::<io::Result<Vec<PathBuf>>>()?;
+
+//     for blockpath in rd.iter() {
+//         println!("------------------------------------------------------------------");
+//         println!("Processing blockpath: {}", blockpath.display());
+
+//         let mut reader = BufReader::new(File::open(blockpath)?);
+//         let mut block = String::new();
+
+//         reader.read_to_string(&mut block);
+//         let mut block_parsed: Value = serde_json::from_str(&block)?;
+//         // println!("block_parsed: {:?}", block_parsed);
 //     }
+
+//     Ok(())
 // }
-
-pub fn read_files() -> io::Result<()> {
-    use std::path::PathBuf;
-    // let datapath = Path::new("").join(std::env::current_exe().unwrap()).join("samples");
-    let datapath = "/home/rxz/dev/sb-actix-lib/sample-data";
-    println!("attemptint to open {}", datapath);
-    let mut rd = read_dir(datapath)?
-        .map(|readdir| readdir.map(|p| p.path()))
-        .collect::<io::Result<Vec<PathBuf>>>()?;
-
-    for blockpath in rd.iter() {
-        println!("------------------------------------------------------------------");
-        println!("Processing blockpath: {}", blockpath.display());
-
-        let mut reader = BufReader::new(File::open(blockpath)?);
-        let mut block = String::new();
-
-        reader.read_to_string(&mut block);
-        let mut block_parsed: Value = serde_json::from_str(&block)?;
-        // println!("block_parsed: {:?}", block_parsed);
-    }
-
-    Ok(())
-}
 
 pub enum KafkaCompressionType{
     Null,
@@ -69,7 +41,7 @@ pub enum KafkaCompressionType{
     Zstd
 }
 
-fn instantiate_cons_prod(source_topic:&str, kfk_compression_type:KafkaCompressionType, destination_topic:&str)->Result<(StreamConsumer, FutureProducer), KafkaError>{
+fn instantiate_cons_prod( kfk_compression_type:KafkaCompressionType, compression_level:u64)->Result<(StreamConsumer, FutureProducer), KafkaError>{
     let bootstrap_hosts = "127.0.0.1:9095";
     let default_timeout = Timeout::After(Duration::from_millis(15000));
     let group_id = "compression-benchmarks";
@@ -90,6 +62,7 @@ fn instantiate_cons_prod(source_topic:&str, kfk_compression_type:KafkaCompressio
     producer_config.set("group.id"                    , group_id        );
     producer_config.set("statistics.interval.ms"      , "500"           );
     producer_config.set("compression.type"            , compression_type);
+    producer_config.set("compression.level"            , u64::to_string(&compression_level));
     producer_config.set("enable.idempotence"          , "true"          ); // required for keeping msgs sequential
     producer_config.set("queue.buffering.max.messages", "10000000"      ); // 100k msgs buffered
     producer_config.set("queue.buffering.max.kbytes"  , "2047483647"    ); // 2GB buffered
@@ -108,37 +81,59 @@ fn instantiate_cons_prod(source_topic:&str, kfk_compression_type:KafkaCompressio
     Ok((consumer, producer))
 }
 
-pub async fn unencoded_to_gzip() {
+
+// compression.level = -1 .. 12 	default = -1 	medium
+// Compression level parameter for algorithm selected by configuration property compression.codec. 
+// Higher values will result in better compression at the cost of more CPU usage.
+// Usable range is algorithm-dependent: [0-9] for gzip; [0-12] for lz4; only 0 for snappy; 
+// -1 = codec-dependent default compression level.
+// Type: integer
+
+pub async fn unencoded_to_gzip(compression_level:usize) {
 
     let default_timeout          = Timeout::After(Duration::from_millis(15000));
-    let (consumer,producer)      = instantiate_cons_prod("compression_data_control", KafkaCompressionType::Gzip, "compression_data_gzip").unwrap();
-    let source_topic             = "compression_data_control";
+
+    let (consumer,producer) = instantiate_cons_prod( KafkaCompressionType::Gzip,compression_level as u64).unwrap();
+    let source_topic        = "compression_data_control";
+    let destination_topic   = format!("compression_gzip_{}", compression_level);
+
     let mut topic_partition_list = TopicPartitionList::new();
     topic_partition_list.add_partition(source_topic, 0);
     topic_partition_list.set_partition_offset(source_topic, 0, Offset::Beginning)
     .expect("failed to set partition message");
     consumer.assign(&topic_partition_list).expect("Couldn't assign consumer");
 
+    let mut total_elapsed = std::time::Instant::now();
+    let mut message_count = 0;
+    let commit_times = async {
+        let mut times_to_commit:Vec<u128> = vec![]; // let this be a proxy for userspace 
 
-    let mut count = 0;
-    async {
         loop {
             let msg = consumer.recv().await.unwrap();
-            println!("Offset :{:?}", msg.offset());
-            let dest_topic = "compression_data_control";
-            let offset     =  msg.offset().to_le_bytes();
-            let r:FutureRecord<_, [u8]> = FutureRecord::to(dest_topic)
-                .payload(msg.payload().unwrap()).key(&());
+            // println!("Offset :{:?}", msg.offset());
+            // let offset           = msg.offset().to_le_bytes();
+            let inner_instant = std::time::Instant::now();
+            let r:FutureRecord<_, [u8]> = FutureRecord::to(&destination_topic).payload(msg.payload().unwrap()).key(&());
+            let future           = producer.send(r, Timeout::After(Duration::from_millis(15000)));
+            if  future.await.map_or(-1, |_| {println!("Processed {} successfully.", &message_count); 0}) < 0{
+                println!("Message {} processing failed.", message_count);
+            }else{
+                times_to_commit.push(inner_instant.elapsed().as_millis());
+            }
 
-            let future = producer.send(r, Timeout::After(Duration::from_millis(15000)));
-            future.await.map_or(-1, |_| {println!("Processed offset {:?} successfully.", &offset); 0});
-            count+=1;
-            if count == 5000{
-                println!("Migrated 5000 mesages to topic {}. Exiting.", dest_topic);
-                exit(0);
+            message_count+=1;
+            if message_count == 5000{
+                println!("Migrated all 5000 mesages to topic {}. Exiting.", destination_topic);
+                break
             }
         }
+        times_to_commit
     }.await;
+
+    let migration_total   = total_elapsed.elapsed();
+    let migration_msg_avg = commit_times.iter().fold(0, |acc,next| acc+next)/commit_times.len() as u128;
+    
+
 }
 
 
