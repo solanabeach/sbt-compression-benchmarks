@@ -1,2 +1,0 @@
-migration_total	: 563515
-migration_msg_avg	: 373
