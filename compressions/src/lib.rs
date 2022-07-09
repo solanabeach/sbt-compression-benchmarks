@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rdkafka::config::FromClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::error::KafkaError;
 use rdkafka::message::ToBytes;
 use rdkafka::util::Timeout;
 use rdkafka::{ClientConfig, Message, Offset, TopicPartitionList};
@@ -15,6 +16,7 @@ use sb_backend_3_actix::actors::kafka::{AtrKafkaConsumer, MsgJumpToOffset};
 use sb_backend_3_actix::actors::sb_actor::SBActor;
 use sb_backend_3_actix::actors::sb_atr_wrapper::ActorWrap;
 
+pub mod timeit;
 use rdkafka::producer::{BaseProducer, FutureProducer, FutureRecord};
 use sb_backend_3_actix::messages::MsgVoid;
 use serde_json::Value;
@@ -59,6 +61,88 @@ pub fn read_files() -> io::Result<()> {
     Ok(())
 }
 
+pub enum KafkaCompressionType{
+    Null,
+    Gzip,
+    Snappy,
+    Lz4,
+    Zstd
+}
+
+fn instantiate_cons_prod(source_topic:&str, kfk_compression_type:KafkaCompressionType, destination_topic:&str)->Result<(StreamConsumer, FutureProducer), KafkaError>{
+    let bootstrap_hosts = "127.0.0.1:9095";
+    let default_timeout = Timeout::After(Duration::from_millis(15000));
+    let group_id = "compression-benchmarks";
+
+    let mut compression_type:&str;
+
+    match kfk_compression_type{
+        Null   => compression_type = "none",
+        Gzip   => compression_type = "gzip",
+        Snappy => compression_type = "snappy",
+        Lz4    => compression_type = "lz4",
+        Zstd   => compression_type = "zstd"
+    }
+
+    let mut producer_config = ClientConfig::new();
+
+    producer_config.set("bootstrap.servers"           , bootstrap_hosts );
+    producer_config.set("group.id"                    , group_id        );
+    producer_config.set("statistics.interval.ms"      , "500"           );
+    producer_config.set("compression.type"            , compression_type);
+    producer_config.set("enable.idempotence"          , "true"          ); // required for keeping msgs sequential
+    producer_config.set("queue.buffering.max.messages", "10000000"      ); // 100k msgs buffered
+    producer_config.set("queue.buffering.max.kbytes"  , "2047483647"    ); // 2GB buffered
+    producer_config.set("message.max.bytes"           , "500000000"     ); // max message size 500MB
+    let producer =
+        FutureProducer::from_config(&producer_config).expect("Failed to created producer");
+
+    let mut consumer_config = ClientConfig::new();
+    consumer_config.set("bootstrap.servers"          , bootstrap_hosts);
+    consumer_config.set("group.id"                   , group_id       );
+    consumer_config.set("socket.send.buffer.bytes"   , "5048576"      );
+    consumer_config.set("socket.receive.buffer.bytes", "5048576"      );
+    consumer_config.set("queued.max.messages.kbytes" , "2096151"      );
+    let consumer: StreamConsumer =
+        StreamConsumer::from_config(&consumer_config).expect("Couldn't create consumer");
+    Ok((consumer, producer))
+}
+
+pub async fn unencoded_to_gzip() {
+
+    let default_timeout          = Timeout::After(Duration::from_millis(15000));
+    let (consumer,producer)      = instantiate_cons_prod("compression_data_control", KafkaCompressionType::Gzip, "compression_data_gzip").unwrap();
+    let source_topic             = "compression_data_control";
+    let mut topic_partition_list = TopicPartitionList::new();
+    topic_partition_list.add_partition(source_topic, 0);
+    topic_partition_list.set_partition_offset(source_topic, 0, Offset::Beginning)
+    .expect("failed to set partition message");
+    consumer.assign(&topic_partition_list).expect("Couldn't assign consumer");
+
+
+    let mut count = 0;
+    async {
+        loop {
+            let msg = consumer.recv().await.unwrap();
+            println!("Offset :{:?}", msg.offset());
+            let dest_topic = "compression_data_control";
+            let offset     =  msg.offset().to_le_bytes();
+            let r:FutureRecord<_, [u8]> = FutureRecord::to(dest_topic)
+                .payload(msg.payload().unwrap()).key(&());
+
+            let future = producer.send(r, Timeout::After(Duration::from_millis(15000)));
+            future.await.map_or(-1, |_| {println!("Processed offset {:?} successfully.", &offset); 0});
+            count+=1;
+            if count == 5000{
+                println!("Migrated 5000 mesages to topic {}. Exiting.", dest_topic);
+                exit(0);
+            }
+        }
+    }.await;
+}
+
+
+
 pub async fn funnel_data_off() {
     let topic = "modern_blocks_json";
     let bootstrap_hosts = "127.0.0.1:9095";
@@ -68,7 +152,8 @@ pub async fn funnel_data_off() {
     producer_config.set("bootstrap.servers", bootstrap_hosts);
     producer_config.set("group.id", "compression-benchmarks");
     producer_config.set("statistics.interval.ms", "500");
-    producer_config.set("compression.type", "gzip");
+    // producer_config.set("compression.type", "gzip");
+    producer_config.set("compression.type", "none");
     producer_config.set("enable.idempotence", "true"); // required for keeping msgs sequential
     producer_config.set("queue.buffering.max.messages", "10000000"); // 100k msgs buffered
     producer_config.set("queue.buffering.max.kbytes", "2047483647"); // 2GB buffered
@@ -86,7 +171,7 @@ pub async fn funnel_data_off() {
         StreamConsumer::from_config(&consumer_config).expect("Couldn't create consumer");
     let mut topic_partition_list = TopicPartitionList::new();
     topic_partition_list.add_partition(topic, 0);
-    match topic_partition_list.set_partition_offset(topic, 0, Offset::OffsetTail(5000)) {
+    match topic_partition_list.set_partition_offset(topic, 0, Offset::OffsetTail(1374)) {
         Ok(_) => {}
         Err(e) => {
             println!("Error setting partition offset: {}", e);
@@ -98,18 +183,14 @@ pub async fn funnel_data_off() {
         .expect("Couldn't assign consumer");
 
     let mut count = 0;
-
     async {
         loop {
             let msg = consumer.recv().await.unwrap();
             println!("Offset :{:?}", msg.offset());
-
-            let dest_topic = "compression_benchmark_data";
-            let offset = msg.offset().to_le_bytes();
-            println!("encoded the offset as {:?}", i64::from_le_bytes(offset));
-            let r = FutureRecord::to(dest_topic)
-                .payload(msg.payload().unwrap())
-                .key(&offset);
+            let dest_topic = "compression_data_control";
+            let offset     =  msg.offset().to_le_bytes();
+            let r:FutureRecord<_, [u8]> = FutureRecord::to(dest_topic)
+                .payload(msg.payload().unwrap()).key(&());
 
             let future = producer.send(r, Timeout::After(Duration::from_millis(15000)));
             future.await.map_or(-1, |_| {println!("Processed offset {:?} successfully.", &offset); 0});
@@ -118,7 +199,6 @@ pub async fn funnel_data_off() {
                 println!("Migrated 5000 mesages to topic {}. Exiting.", dest_topic);
                 exit(0);
             }
-
         }
     }.await;
 }
